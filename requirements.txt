@@ -1,5 +1,7 @@
 streamlit
 pandas
+matplotlib
 pdfplumber
+openpyxl
 google-generativeai
-openpyxl # Needed for pandas to read .xlsx files
+

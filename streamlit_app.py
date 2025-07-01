@@ -11,96 +11,152 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import os
-import google.generativeai as genai # Import the Gemini library
+import matplotlib.pyplot as plt
+import google.generativeai as genai
 
-# Load API key securely from Streamlit secrets or environment
-# It's recommended to set this as a Streamlit secret named 'GEMINI_API_KEY'
+# Load Gemini API key
 gemini_api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
 
 # Page config
 st.set_page_config(page_title="AI Report Summarizer", layout="wide")
 st.title("📊 AI Report Summarizer")
-st.markdown("Upload your PDF or Excel report to get a concise summary powered by Gemini AI.")
+st.markdown("Upload your PDF or Excel report to get a concise, high-level summary powered by Gemini AI.")
+
+# Sidebar settings
+with st.sidebar:
+    st.markdown("### ⚙️ Summary Settings")
+    summary_style = st.radio("Summary Style", ["Business Analyst", "Basic"])
 
 # Function: Extract PDF text
 def extract_text_from_pdf(file):
-    """
-    Extracts text content from a PDF file using pdfplumber.
-    """
     with pdfplumber.open(file) as pdf:
-        # Join text from all pages, filtering out any empty pages
         return "\n".join(
             page.extract_text() for page in pdf.pages if page.extract_text()
         )
 
-# Function: Generate Gemini summary
-def generate_summary(text_input):
-    """
-    Generates a summary using the Gemini API.
-    """
+# Function: Generate summary using Gemini
+def generate_summary(text_input, style="Business Analyst"):
     if not gemini_api_key:
-        return "❌ Gemini API key is missing. Please set it in Streamlit Secrets (e.g., `st.secrets['GEMINI_API_KEY']`) or as an environment variable (GEMINI_API_KEY)."
+        return "❌ Gemini API key is missing."
 
     try:
-        # Configure the Gemini API with the provided key
         genai.configure(api_key=gemini_api_key)
-
-        # Initialize the GenerativeModel with 'gemini-2.0-flash'
-        # This model is suitable for text generation tasks like summarization.
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # Construct the prompt for summarization.
-        # Gemini's generate_content method can take a simple string prompt.
-        prompt = "Summarize this report in bullet points:\n\n" + text_input
+        if style == "Business Analyst":
+            prompt = f"""
+You are a business analyst.
 
-        # Make the API call to generate content
+Analyze the report below and summarize using bullet points:
+- Key trends
+- Patterns or outliers
+- Timeframe or dates mentioned
+- Financial/operational highlights
+- Actionable insights (if any)
+
+Report:
+{text_input}
+"""
+        else:
+            prompt = "Summarize this report in bullet points:\n\n" + text_input
+
         response = model.generate_content(prompt)
-
-        # Return the generated text content
         return response.text
     except Exception as e:
-        # Catch any exceptions during the API call and return an error message
         return f"❌ Error from Gemini API: {e}"
 
-# Function: Summarize Excel content
-def summarize_excel(uploaded_file):
-    """
-    Reads an Excel file, extracts a preview, and generates a summary using Gemini.
-    """
-    df = pd.read_excel(uploaded_file)
+# Function: Extract date range
+def extract_date_range(df):
+    for col in df.columns:
+        try:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+            if df[col].notna().sum() > 0:
+                return df[col].min().date(), df[col].max().date()
+        except Exception:
+            continue
+    return None, None
 
-    # Get a string representation of the first 5 rows for the prompt
+# Function: Summarize Excel content
+def summarize_excel(uploaded_file, style="Business Analyst"):
+    df = pd.read_excel(uploaded_file)
     preview = df.head(5).to_string(index=False)
 
-    # Construct a prompt that includes metadata about the Excel file and its preview
-    prompt = f"The Excel file contains {len(df)} rows and {len(df.columns)} columns. Here's a preview of the data:\n{preview}\n\nSummarize this data in a few key insights."
+    start_date, end_date = extract_date_range(df)
+    date_info = f"The data spans from **{start_date}** to **{end_date}**." if start_date and end_date else "The report has no recognizable dates."
 
-    # Generate the summary using the Gemini API
-    return generate_summary(prompt)
+    prompt = f"""
+You are a business analyst.
 
-# File uploader widget in the Streamlit app
+The Excel file has {len(df)} rows and {len(df.columns)} columns.
+{date_info}
+
+Here's a sample of the data:
+{preview}
+
+Please provide a summary including:
+- Key business trends
+- Any outliers or insights
+- Mention of any metrics over time
+- Actionable recommendations
+"""
+
+    return generate_summary(prompt, style), df
+
+# Function: Plotting
+def show_basic_plot(df):
+    df_copy = df.copy()
+    for col in df_copy.columns:
+        try:
+            df_copy[col] = pd.to_datetime(df_copy[col], errors='coerce')
+        except:
+            continue
+
+    date_cols = df_copy.select_dtypes(include=["datetime"]).columns
+    numeric_cols = df.select_dtypes(include=["number"]).columns
+
+    if len(date_cols) > 0 and len(numeric_cols) > 0:
+        with st.expander("📈 View Auto-Generated Plot"):
+            st.markdown("Auto-selected columns for plotting.")
+            selected_date = st.selectbox("Select Date Column", date_cols)
+            selected_metric = st.selectbox("Select Numeric Column", numeric_cols)
+
+            fig, ax = plt.subplots()
+            df_sorted = df.sort_values(by=selected_date)
+            ax.plot(df_sorted[selected_date], df_sorted[selected_metric], marker='o')
+            ax.set_title(f"{selected_metric} Over Time")
+            ax.set_xlabel("Date")
+            ax.set_ylabel(selected_metric)
+            st.pyplot(fig)
+
+# File uploader
 uploaded_file = st.file_uploader("Upload a PDF or Excel File", type=["pdf", "xlsx"])
 
-# Process the uploaded file if one exists
 if uploaded_file:
-    with st.spinner("Reading file and generating summary..."):
+    with st.spinner("Processing file..."):
         try:
             summary = ""
+            df = None
+
             if uploaded_file.name.endswith(".pdf"):
                 text = extract_text_from_pdf(uploaded_file)
-                # Check if any text was extracted from the PDF
-                if not text.strip(): # .strip() removes whitespace, so empty string means no content
-                    summary = "❌ No readable text found in the PDF. Please ensure it's not an image-only PDF or that the text is selectable."
+                if not text.strip():
+                    summary = "❌ No readable text found in the PDF. Ensure it's not image-based."
                 else:
-                    summary = generate_summary(text)
-            elif uploaded_file.name.endswith(".xlsx"):
-                summary = summarize_excel(uploaded_file)
-            else:
-                summary = "Unsupported file format. Please upload a PDF or Excel file."
+                    summary = generate_summary(text, summary_style)
 
-            # Display the generated summary
-            st.subheader("📝 Summary")
-            st.success(summary)
+            elif uploaded_file.name.endswith(".xlsx"):
+                summary, df = summarize_excel(uploaded_file, summary_style)
+
+            st.subheader("📝 Executive Summary")
+            for line in summary.split('\n'):
+                if line.strip().startswith("-"):
+                    st.markdown(f"✅ {line.strip()}")
+                else:
+                    st.markdown(line.strip())
+
+            # Show plot if Excel
+            if df is not None:
+                show_basic_plot(df)
+
         except Exception as e:
-            # Catch any unexpected errors during file processing or summarization
-            st.error(f"An error occurred: {str(e)}")
+            st.error(f"An error occurred: {e}")

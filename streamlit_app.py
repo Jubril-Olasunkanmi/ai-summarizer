@@ -10,158 +10,101 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import os
-import matplotlib.pyplot as plt
-import google.generativeai as genai
+import google.generativeai as genai # Import the Gemini library
 
-# Load Gemini API key
+# Load API key securely from Streamlit secrets or environment
+# It's recommended to set this as a Streamlit secret named 'GEMINI_API_KEY'
 gemini_api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
 
 # Page config
 st.set_page_config(page_title="AI Report Summarizer", layout="wide")
 st.title("📊 AI Report Summarizer")
-st.markdown("Upload your PDF or Excel report to get a concise, executive-level summary powered by Gemini AI.")
-
-# Sidebar settings
-with st.sidebar:
-    st.markdown("### ⚙️ Summary Settings")
-    summary_focus = st.radio("Summary Focus", ["Executive Insight", "Descriptive Overview"])
+st.markdown("Upload your PDF or Excel report to get a concise summary powered by Gemini AI.")
 
 # Function: Extract PDF text
 def extract_text_from_pdf(file):
+    """
+    Extracts text content from a PDF file using pdfplumber.
+    """
     with pdfplumber.open(file) as pdf:
+        # Join text from all pages, filtering out any empty pages
         return "\n".join(
             page.extract_text() for page in pdf.pages if page.extract_text()
         )
 
-# Function: Generate summary using Gemini
-def generate_summary(text_input, focus="Executive Insight"):
+# Function: Generate Gemini summary
+def generate_summary(text_input):
+    """
+    Generates a summary using the Gemini API with an improved, more directive prompt.
+    """
     if not gemini_api_key:
-        return "❌ Gemini API key is missing."
+        return "❌ Gemini API key is missing. Please set it in Streamlit Secrets (e.g., `st.secrets['GEMINI_API_KEY']`) or as an environment variable (GEMINI_API_KEY)."
 
     try:
+        # Configure the Gemini API with the provided key
         genai.configure(api_key=gemini_api_key)
+        
+        # Initialize the GenerativeModel with 'gemini-2.0-flash'
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        if focus == "Executive Insight":
-            prompt = f"""
-You are a senior business analyst preparing a board-level operational summary.
+        # --- IMPROVED PROMPT ---
+        # This prompt is more directive, aiming to prevent hallucination and focus on facts.
+        prompt = (
+            "Based *strictly* on the following report, provide a concise summary in bullet points. "
+            "Focus on key operational and revenue figures, including specific percentages and values where available. "
+            "Do not infer or add information not explicitly present in the text. "
+            "Clearly state which platform (CabZero, Bolt, or Uber) generated the highest revenue for both the daily and monthly periods mentioned.\n\n"
+        ) + text_input
 
-Analyze the report below and provide a concise executive summary with:
-- High-priority business trends (only those with material impact)
-- Operational concerns or anomalies (explain cause if detectable)
-- Clear breakdown by source (e.g. Bolt, Uber, CabZero)
-- Hypotheses on reasons behind key fluctuations or patterns
-- Actionable insights to inform operations or strategy
-- Highlight any anomalies or specific days that require investigation
-- Avoid listing all data values. Focus on insights.
-
-DATA:
-{text_input}
-"""
-        else:
-            prompt = "Summarize this report in bullet points with key dates and values:\n\n" + text_input
-
+        # Make the API call to generate content
         response = model.generate_content(prompt)
+        
+        # Return the generated text content
         return response.text
     except Exception as e:
+        # Catch any exceptions during the API call and return an error message
         return f"❌ Error from Gemini API: {e}"
 
-# Function: Extract date range
-def extract_date_range(df):
-    for col in df.columns:
-        try:
-            df[col] = pd.to_datetime(df[col], errors='coerce')
-            if df[col].notna().sum() > 0:
-                return df[col].min().date(), df[col].max().date()
-        except Exception:
-            continue
-    return None, None
-
 # Function: Summarize Excel content
-def summarize_excel(uploaded_file, focus="Executive Insight"):
+def summarize_excel(uploaded_file):
+    """
+    Reads an Excel file, extracts a preview, and generates a summary using Gemini.
+    """
     df = pd.read_excel(uploaded_file)
+    
+    # Get a string representation of the first 5 rows for the prompt
     preview = df.head(5).to_string(index=False)
+    
+    # Construct a prompt that includes metadata about the Excel file and its preview
+    prompt = f"The Excel file contains {len(df)} rows and {len(df.columns)} columns. Here's a preview of the data:\n{preview}\n\nSummarize this data in a few key insights, focusing on trends or significant values if apparent from the preview. Do not infer information beyond what is presented in the preview."
+    
+    # Generate the summary using the Gemini API
+    return generate_summary(prompt)
 
-    start_date, end_date = extract_date_range(df)
-    date_info = f"The data spans from **{start_date}** to **{end_date}**." if start_date and end_date else "The report has no recognizable dates."
-
-    if focus == "Executive Insight":
-        prompt = f"""
-You are a senior business analyst preparing a board-level operational summary.
-
-The Excel file has {len(df)} rows and {len(df.columns)} columns.
-{date_info}
-
-Here’s a preview of the dataset:
-{preview}
-
-Summarize the data with:
-- Critical trends and changes over time
-- Patterns or outliers in performance
-- Explanation of any sharp drops or spikes
-- Breakdown by company/metric if present
-- Clear, actionable insights for operational improvement
-- Keep the tone sharp, focused, and decision-oriented.
-"""
-    else:
-        prompt = f"The Excel file has {len(df)} rows and {len(df.columns)} columns.\n{date_info}\n\nHere’s a preview of the data:\n{preview}\n\nSummarize this data in bullet points."
-
-    return generate_summary(prompt, focus), df
-
-# Function: Plotting
-def show_basic_plot(df):
-    df_copy = df.copy()
-    for col in df_copy.columns:
-        try:
-            df_copy[col] = pd.to_datetime(df_copy[col], errors='coerce')
-        except:
-            continue
-
-    date_cols = df_copy.select_dtypes(include=["datetime"]).columns
-    numeric_cols = df.select_dtypes(include=["number"]).columns
-
-    if len(date_cols) > 0 and len(numeric_cols) > 0:
-        with st.expander("📈 View Auto-Generated Plot"):
-            st.markdown("Auto-selected columns for plotting.")
-            selected_date = st.selectbox("Select Date Column", date_cols)
-            selected_metric = st.selectbox("Select Numeric Column", numeric_cols)
-
-            fig, ax = plt.subplots()
-            df_sorted = df.sort_values(by=selected_date)
-            ax.plot(df_sorted[selected_date], df_sorted[selected_metric], marker='o')
-            ax.set_title(f"{selected_metric} Over Time")
-            ax.set_xlabel("Date")
-            ax.set_ylabel(selected_metric)
-            st.pyplot(fig)
-
-# File uploader
+# File uploader widget in the Streamlit app
 uploaded_file = st.file_uploader("Upload a PDF or Excel File", type=["pdf", "xlsx"])
 
+# Process the uploaded file if one exists
 if uploaded_file:
-    with st.spinner("Processing file..."):
+    with st.spinner("Reading file and generating summary..."):
         try:
             summary = ""
-            df = None
-
             if uploaded_file.name.endswith(".pdf"):
                 text = extract_text_from_pdf(uploaded_file)
-                if not text.strip():
-                    summary = "❌ No readable text found in the PDF. Ensure it's not image-based."
+                # Check if any text was extracted from the PDF
+                if not text.strip(): # .strip() removes whitespace, so empty string means no content
+                    summary = "❌ No readable text found in the PDF. Please ensure it's not an image-only PDF or that the text is selectable."
                 else:
-                    summary = generate_summary(text, summary_focus)
-
+                    summary = generate_summary(text)
             elif uploaded_file.name.endswith(".xlsx"):
-                summary, df = summarize_excel(uploaded_file, summary_focus)
+                summary = summarize_excel(uploaded_file)
+            else:
+                summary = "Unsupported file format. Please upload a PDF or Excel file."
 
-            st.subheader("📝 Executive Summary")
-            for line in summary.split('\n'):
-                if line.strip().startswith("-"):
-                    st.markdown(f"✅ {line.strip()}")
-                else:
-                    st.markdown(line.strip())
-
-            if df is not None:
-                show_basic_plot(df)
-
+            # Display the generated summary
+            st.subheader("📝 Summary")
+            st.success(summary)
         except Exception as e:
-            st.error(f"An error occurred: {e}")
+            # Catch any unexpected errors during file processing or summarization
+            st.error(f"An error occurred: {str(e)}")
+
